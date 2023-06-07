@@ -5,7 +5,6 @@ import numpy as np
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
-from pathlib import Path
 from tqdm.auto import tqdm
 from datas import *
 
@@ -19,18 +18,6 @@ def same_seeds(seed):
 	random.seed(seed)
 	torch.backends.cudnn.benchmark = False
 	torch.backends.cudnn.deterministic = True
-
-
-def read_data(split_dir):
-    split_dir = Path(split_dir)
-    texts = []
-    labels = []
-    for label_dir in ["pos", "neg"]:
-        for text_file in (split_dir/label_dir).iterdir():
-            texts.append(text_file.read_text())
-            labels.append(0 if label_dir == "neg" else 1)
-
-    return texts, labels
 
 
 def show_process(train_loss, train_acc, valid_loss, valid_acc):
@@ -53,10 +40,10 @@ def show_process(train_loss, train_acc, valid_loss, valid_acc):
     plt.show()
 
 
-def train_valid(estimator, train_set, valid_set):
+def train_valid1(estimator, train_set, valid_set):
 	device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 	model = copy.deepcopy(estimator).to(device)
-	criterion = nn.BCELoss()
+	criterion = nn.CrossEntropyLoss()
 	optimizer = torch.optim.Adam(model.parameters(), weight_decay=1e-5, lr=5e-3)
 	scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.98, last_epoch=-1)
 
@@ -77,41 +64,110 @@ def train_valid(estimator, train_set, valid_set):
 		model.train()
 		for label, text in tqdm(train_loader):
 			optimizer.zero_grad()
-			predictions = model(text).squeeze(1).double()
-			loss = criterion(predictions, label)
-			
-			rounded_preds = torch.round(predictions)
-			correct = (rounded_preds == label).float()
-			acc = correct.sum() / len(correct)
+			outputs = model(text).squeeze(1).float()
+			loss = criterion(outputs, label.long())
 			
 			loss.backward()
 			optimizer.step()
+
 			train_loss += loss.item()
-			train_acc += acc.item()
+			preds = torch.round(torch.sigmoid(outputs))
+			_, predicted = torch.max(preds, dim=1)
+			train_acc += torch.sum(predicted == label).item()
 		scheduler.step()
 
-		train_losses.append(train_loss / len(train_loader))
-		train_accs.append(train_acc / len(train_loader))
-		print("epcoh [%d], train loss: [%.4f], train accuracy: [%.4f]" % (epoch, train_loss / len(train_loader), train_acc / len(train_loader)))
+		epoch_train_loss = train_loss / len(train_loader.dataset)
+		epoch_train_acc = train_acc / len(train_loader.dataset)
+		train_losses.append(epoch_train_loss)
+		train_accs.append(epoch_train_acc)
+		print("epcoh [%d], train loss: [%.4f], train accuracy: [%.4f]" % (epoch, epoch_train_loss, epoch_train_acc))
 
 		valid_loss = 0
 		valid_acc = 0
 		model.eval()
 		for label, text in val_loader:
 			with torch.no_grad():
-				predictions = model(text).squeeze(1).double()
-				loss = criterion(predictions, label).float()
-				
-				rounded_preds = torch.round(predictions)
-				correct = (rounded_preds == label).float()
-				acc = correct.sum() / len(correct)
+				outputs = model(text)
+				loss = criterion(outputs, label.long())
 				
 				valid_loss += loss.item()
-				valid_acc += acc.item()
+				preds = torch.round(torch.sigmoid(outputs))
+				_, predicted = torch.max(preds, dim=1)
+				valid_acc += torch.sum(predicted == label).item()
 		
-		valid_losses.append(valid_loss / len(val_loader))
-		valid_accs.append(valid_acc / len(val_loader))
-		print("epoch [%d], valid loss: [%.4f], valid accuracy: [%.4f]" % (epoch, valid_loss / len(val_loader), valid_acc / len(val_loader)))
+		epoch_val_loss = valid_loss / len(val_loader.dataset)
+		epoch_val_acc = valid_acc / len(val_loader.dataset)
+		valid_losses.append(epoch_val_loss)
+		valid_accs.append(epoch_val_acc)
+		print("epoch [%d], valid loss: [%.4f], valid accuracy: [%.4f]" % (epoch, epoch_val_loss, epoch_val_acc))
 	
 	return train_losses, train_accs, valid_losses, valid_accs
-		
+
+
+def train_valid2(estimator, train_set, valid_set, device_ids, lr=5e-5, n_epochs=10):
+	# model = copy.deepcopy(estimator).to(device_ids[0])
+	model = torch.nn.DataParallel(module=copy.deepcopy(estimator)).to(device_ids[0])
+	criterion = nn.CrossEntropyLoss()
+	optimizer = torch.optim.Adam(model.parameters(), weight_decay=1e-5, lr=lr)
+	scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.98, last_epoch=-1)
+
+	batch_size = 64
+	train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
+	val_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=False)
+
+	train_losses = []
+	train_accs = []
+	valid_losses = []
+	valid_accs = []
+
+	for epoch in range(1, n_epochs + 1):
+		model.train()
+		train_loss = 0.0
+		train_acc = 0.0
+
+		for batch in tqdm(train_loader):
+			input_ids = batch['input_ids'].to(device_ids[0])
+			attention_mask = batch['attention_mask'].to(device_ids[0])
+			labels = batch['labels'].to(device_ids[0])
+
+			optimizer.zero_grad()
+
+			outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+			loss = criterion(outputs, labels)
+			loss.backward()
+			optimizer.step()
+
+			train_loss += loss.item() * input_ids.size(0)
+			preds = torch.round(torch.sigmoid(outputs))
+			_, predicted = torch.max(preds, dim=1)
+			train_acc += torch.sum(predicted == labels).item()
+		scheduler.step()
+
+		epoch_train_loss = train_loss / len(train_loader.dataset)
+		epoch_train_acc = train_acc / len(train_loader.dataset)
+		train_losses.append(epoch_train_loss)
+		train_accs.append(epoch_train_acc)
+		print("epcoh [%d], train loss: [%.4f], train accuracy: [%.4f]" % (epoch, epoch_train_loss, epoch_train_acc))
+
+		model.eval()
+		val_loss = 0.0
+		val_acc = 0.0
+		for batch in val_loader:
+			with torch.no_grad():
+				input_ids = batch['input_ids'].to(device_ids[0])
+				attention_mask = batch['attention_mask'].to(device_ids[0])
+				labels = batch['labels'].to(device_ids[0])
+				outputs = model(input_ids=input_ids, attention_mask=attention_mask).squeeze(1)
+				loss = criterion(outputs, labels)
+				val_loss += loss.item() * input_ids.size(0)
+				preds = torch.round(torch.sigmoid(outputs))
+				_, predicted = torch.max(preds, dim=1)
+				val_acc += torch.sum(predicted == labels).item()
+
+		epoch_val_loss = val_loss / len(val_loader.dataset)
+		epoch_val_acc = val_acc / len(val_loader.dataset)
+		valid_losses.append(epoch_val_loss)
+		valid_accs.append(epoch_val_acc)
+		print("epoch [%d], valid loss: [%.4f], valid accuracy: [%.4f]" % (epoch, epoch_val_loss, epoch_val_acc))
+
+	return train_losses, train_accs, valid_losses, valid_accs
