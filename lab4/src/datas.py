@@ -46,8 +46,8 @@ def collate_batch(batch):
     label_list, text_list = [], []
     for (_text, _label) in batch:
         label_list.append(_label)
-        processed_text = torch.tensor(_text)
-        text_list.append(processed_text)
+        # processed_text = torch.tensor(_text)
+        text_list.append(torch.tensor(_text))
     padded_text = pad_sequence(text_list, batch_first=False, padding_value=1.0)
     return torch.tensor(label_list, dtype=torch.float64).to(device), padded_text.to(device)
 

@@ -20,18 +20,18 @@ def same_seeds(seed):
 	torch.backends.cudnn.deterministic = True
 
 
-def show_process(train_loss, train_acc, valid_loss, valid_acc):
+def show_process(train_loss, train_acc, valid_loss, valid_acc, title):
     fig, axs = plt.subplots(1, 2, figsize=(12, 5))
 
     axs[0].plot(train_loss, label="Train Loss")
-    axs[0].plot(valid_loss, label="Valid Loss")
+    axs[0].plot(valid_loss, label=title+" Loss")
     axs[0].set_title("Model Loss")
     axs[0].set_xlabel("epoch")
     axs[0].set_ylabel("Binary Entropy Loss")
     axs[0].legend(loc='upper left')
 
     axs[1].plot(train_acc, label="Train Accuracy")
-    axs[1].plot(valid_acc, label="Valid Accuracy")
+    axs[1].plot(valid_acc, label=title+" Accuracy")
     axs[1].set_title("Model Accuracy")
     axs[1].set_xlabel("epoch")
     axs[1].set_ylabel("Accuracy")
@@ -40,15 +40,14 @@ def show_process(train_loss, train_acc, valid_loss, valid_acc):
     plt.show()
 
 
-def train_valid1(estimator, train_set, valid_set):
+def train_valid1(estimator, train_set, valid_set, lr, n_epochs):
 	device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 	model = copy.deepcopy(estimator).to(device)
 	criterion = nn.CrossEntropyLoss()
-	optimizer = torch.optim.Adam(model.parameters(), weight_decay=1e-5, lr=5e-3)
+	optimizer = torch.optim.Adam(model.parameters(), weight_decay=1e-5, lr=lr)
 	scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.98, last_epoch=-1)
 
 	batch_size = 64
-	n_epochs = 10
 	train_loader = DataLoader(train_set, collate_fn=collate_batch, batch_size=batch_size, shuffle=True)
 	val_loader = DataLoader(valid_set, collate_fn=collate_batch, batch_size=batch_size, shuffle=False)
 
@@ -105,7 +104,6 @@ def train_valid1(estimator, train_set, valid_set):
 
 
 def train_valid2(estimator, train_set, valid_set, device_ids, lr=5e-5, n_epochs=10):
-	# model = copy.deepcopy(estimator).to(device_ids[0])
 	model = torch.nn.DataParallel(module=copy.deepcopy(estimator)).to(device_ids[0])
 	criterion = nn.CrossEntropyLoss()
 	optimizer = torch.optim.Adam(model.parameters(), weight_decay=1e-5, lr=lr)
@@ -137,7 +135,8 @@ def train_valid2(estimator, train_set, valid_set, device_ids, lr=5e-5, n_epochs=
 			loss.backward()
 			optimizer.step()
 
-			train_loss += loss.item() * input_ids.size(0)
+			# train_loss += loss.item() * input_ids.size(0)
+			train_loss += loss.item()
 			preds = torch.round(torch.sigmoid(outputs))
 			_, predicted = torch.max(preds, dim=1)
 			train_acc += torch.sum(predicted == labels).item()
@@ -159,7 +158,8 @@ def train_valid2(estimator, train_set, valid_set, device_ids, lr=5e-5, n_epochs=
 				labels = batch['labels'].to(device_ids[0])
 				outputs = model(input_ids=input_ids, attention_mask=attention_mask).squeeze(1)
 				loss = criterion(outputs, labels)
-				val_loss += loss.item() * input_ids.size(0)
+				# val_loss += loss.item() * input_ids.size(0)
+				val_loss += loss.item()
 				preds = torch.round(torch.sigmoid(outputs))
 				_, predicted = torch.max(preds, dim=1)
 				val_acc += torch.sum(predicted == labels).item()
